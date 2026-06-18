@@ -1,11 +1,12 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { db, supabase } from '@/lib/supabase';
-import { ShieldAlert } from 'lucide-react';
+import { ShieldAlert, Timer } from 'lucide-react';
 
 export default function PlayerDashboard() {
   const [player, setPlayer] = useState<any>(null);
+  const playerRef = useRef<any>(null); // ใช้ useRef เพื่อให้ท่อ Realtime เข้าถึงสีทีมปัจจุบันได้แม่นยำ
   
   // ฟอร์มส่งข้อมูล
   const [targetId, setTargetId] = useState('');
@@ -16,25 +17,51 @@ export default function PlayerDashboard() {
   const [loadingAction, setLoadingAction] = useState(false);
   const router = useRouter();
 
+  // ⏱️ ระบบ Cooldown 30 วินาที 
+  const [cooldownTime, setCooldownTime] = useState(0);
+
+  // อัปเดต ref ทุกครั้งที่ข้อมูล player เปลี่ยนแปลง
+  useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
   useEffect(() => {
     const cachedId = localStorage.getItem('player_id');
     if (!cachedId) return router.push('/');
 
-    // ดึงข้อมูลตัวเองรอบแรกครั้งเดียว
     const initFetch = async () => {
       const { data: pData } = await db().from('players').select('*').eq('id', cachedId).single();
       if (pData) setPlayer(pData);
     };
     initFetch();
 
-    // ดักฟัง Realtime เฉพาะตอนแอดมินเสกแต้มให้ หรือเพื่อนโอนมาหาเราเท่านั้น (เซฟรีเควสสุดๆ)
+    // 🌐 ท่อ Realtime อัจฉริยะ ดักฟังทั้งแต้มตัวเอง และตรวจคูลดาวน์ข้ามทีม
     const playerChannel = supabase
       .channel(`my-private-score-${cachedId}`)
       .on(
         'postgres_changes', 
         { event: 'UPDATE', schema: 'public', table: 'players', filter: `id=eq.${cachedId}` }, 
         (payload) => {
-          setPlayer(payload.new);
+          const oldData = payload.old;
+          const newData = payload.new;
+          
+          setPlayer(newData);
+
+          // 🚨 เช็กกลไกคูลดาวน์สำหรับฝั่ง "คนรับโอน"
+          // ถ้าแต้มเพิ่มขึ้น และมีการแนบข้อมูลสีของคนโอนมาในช่อง last_transfer_by
+          if (newData.score > (oldData?.score || 0) && newData.last_transfer_by) {
+            const myColor = playerRef.current?.team_color?.toLowerCase();
+            const senderColor = newData.last_transfer_by.toLowerCase(); // เราจะแอบส่งสีทีมคนโอนมาในนี้
+
+            // ถ้าคนละสีกัน (โอนข้ามทีม) สั่งให้เครื่องคนรับติดคูลดาวน์ 30 วินาทีทันที!
+            if (myColor && senderColor && myColor !== senderColor) {
+              setCooldownTime(30);
+              setActionMessage({ 
+                text: `⚠️ คุณได้รับแต้มโอนข้ามทีม! ระบบล็อกคูลดาวน์โอนต่อ 30 วินาที!`, 
+                isError: true 
+              });
+            }
+          }
         }
       )
       .subscribe();
@@ -44,12 +71,24 @@ export default function PlayerDashboard() {
     };
   }, [router]);
 
+  // ⏱️ ฟังก์ชันนับถอยหลัง Cooldown 
+  useEffect(() => {
+    if (cooldownTime <= 0) return;
+    const timer = setInterval(() => {
+      setCooldownTime((prev) => prev - 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [cooldownTime]);
+
   const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     setActionMessage({ text: '', isError: false });
     const amount = parseInt(transferAmount);
     const cleanTargetId = targetId.toUpperCase().trim();
 
+    if (cooldownTime > 0) {
+      return setActionMessage({ text: `ระบบโอนติดคูลดาวน์! กรุณารออีก ${cooldownTime} วินาที`, isError: true });
+    }
     if (!cleanTargetId || isNaN(amount) || amount <= 0) {
       return setActionMessage({ text: 'กรุณากรอกข้อมูลการโอนให้ถูกต้อง', isError: true });
     }
@@ -63,7 +102,6 @@ export default function PlayerDashboard() {
     try {
       setLoadingAction(true);
       
-      // ดึงข้อมูลผู้เล่นปลายทางเพื่อตรวจสอบสถานะ
       const { data: targetPlayer, error } = await db()
         .from('players')
         .select('*')
@@ -75,20 +113,34 @@ export default function PlayerDashboard() {
         return setActionMessage({ text: 'ไม่พบรหัสผู้เล่นปลายทางในระบบ', isError: true });
       }
 
-      // 🚨 [เพิ่มใหม่] ตรวจสอบว่าผู้เล่นปลายทางทำการ Active (ลงทะเบียน) หรือยัง
       if (!targetPlayer.is_active) {
         setLoadingAction(false);
-        return setActionMessage({ text: `ไม่สามารถโอนได้เนื่องจากไอดี ${cleanTargetId} ยังไม่ได้เปิดใช้งาน (Not Active) ❌`, isError: true });
+        return setActionMessage({ text: `ไม่สามารถโอนได้เนื่องจากไอดี ${cleanTargetId} ยังไม่ได้เปิดใช้งาน ❌`, isError: true });
       }
 
-      // อัปเดตข้อมูลขึ้นคลาวด์ Supabase
-      await db().from('players').update({ score: player.score - amount }).eq('id', player.id);
-      await db().from('players').update({ score: targetPlayer.score + amount }).eq('id', targetPlayer.id);
+      const isCrossTeam = player.team_color?.toLowerCase() !== targetPlayer.team_color?.toLowerCase();
 
-      // ✨ [Optimistic Update] ปรับแต้มบนหน้าจอมือถือตัวเองทันทีโดยไม่ต้องดึงข้อมูลจาก Supabase ซ้ำ
+      // 📤 อัปเดตข้อมูลขึ้น Supabase
+      // ฝั่งคนโอน: ลดแต้มปกติ
+      await db().from('players').update({ score: player.score - amount }).eq('id', player.id);
+      
+      // ฝั่งคนรับ: เพิ่มแต้ม + แนบ "สีทีมของคนโอน" ไปในช่อง last_transfer_by เพื่อให้ท่อ Realtime ฝั่งนู้นใช้เช็กข้ามทีม
+      await db().from('players').update({ 
+        score: targetPlayer.score + amount,
+        last_transfer_by: player.team_color // 👈 ส่งสีทีมของตัวเองไปบอกคนรับ
+      }).eq('id', targetPlayer.id);
+
+      // ✨ [Optimistic Update] ปรับแต้มบนหน้าจอมือถือตัวเองทันที
       setPlayer((prev: any) => ({ ...prev, score: prev.score - amount }));
 
-      setActionMessage({ text: `โอนสำเร็จ! มอบ ${amount} แต้มให้แก่ ${targetPlayer.id} (${targetPlayer.player_name || 'ผู้เล่น'}) เรียบร้อย`, isError: false });
+      // ถ้าเป็นการโอนข้ามทีม ฝั่งคนโอนก็ติดคูลดาวน์ทันที 30 วินาที
+      if (isCrossTeam) {
+        setCooldownTime(30);
+        setActionMessage({ text: `โอนข้ามทีมสำเร็จ! มอบ ${amount} แต้มให้ ${targetPlayer.id} ⚠️ แพ็คคู่คูลดาวน์ทำงาน 30 วินาที!`, isError: false });
+      } else {
+        setActionMessage({ text: `โอนให้เพื่อนร่วมทีมสำเร็จ! มอบ ${amount} แต้มให้แก่ ${targetPlayer.id} เรียบร้อย`, isError: false });
+      }
+
       setTargetId('');
       setTransferAmount('');
       setLoadingAction(false);
@@ -137,13 +189,12 @@ export default function PlayerDashboard() {
         await supabase.rpc('bulk_minus_enemies_score', { my_team: player.team_color, minus_amount: 5 });
       }
 
-      // บันทึกสถานะการใช้โค้ด
       await db().from('drop_codes').update({ is_used: true, used_by: player.id, used_at: new Date().toISOString() }).eq('code', cleanedCode);
       
+      // สังเกตตรงนี้: ตอนอัปเดตแต้มจากไอเทม เราจะไม่มีการใส่ฟิลด์ last_transfer_by เด็ดขาด 
+      // ทำให้ท่อ Realtime รู้ว่าเป็นไอเทมระบบและไม่สั่งติดคูลดาวน์ครับ ปลอดภัยหายห่วง!
       if (cData.effect_type !== 'team_plus_5' && cData.effect_type !== 'enemy_minus_5') {
         await db().from('players').update({ score: newScore }).eq('id', player.id);
-        
-        // ✨ [Optimistic Update] ปรับแต้มส่วนตัวบนหน้าจอทันที ไม่ต้อง Fetch ใหม่
         setPlayer((prev: any) => ({ ...prev, score: newScore }));
       }
 
@@ -225,25 +276,39 @@ export default function PlayerDashboard() {
                 type="text"
                 value={targetId}
                 onChange={(e) => setTargetId(e.target.value)}
-                disabled={isJailed || loadingAction}
+                disabled={isJailed || loadingAction || cooldownTime > 0}
                 placeholder="ID เพื่อน (เช่น B02)"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono uppercase text-xs focus:outline-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono uppercase text-xs focus:outline-none disabled:opacity-50"
               />
               <input
                 type="number"
                 value={transferAmount}
                 onChange={(e) => setTransferAmount(e.target.value)}
-                disabled={isJailed || loadingAction}
+                disabled={isJailed || loadingAction || cooldownTime > 0}
                 placeholder="จำนวนแต้ม"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none disabled:opacity-50"
               />
             </div>
+            
             <button 
               type="submit" 
-              disabled={isJailed || loadingAction} 
-              className="w-full bg-slate-800 hover:bg-emerald-600 disabled:bg-slate-900 disabled:border-slate-800 disabled:text-slate-600 border border-slate-700 hover:border-emerald-500 text-slate-200 hover:text-white font-bold py-2 rounded-xl text-xs uppercase tracking-widest transition"
+              disabled={isJailed || loadingAction || cooldownTime > 0} 
+              className={`w-full font-bold py-2 rounded-xl text-xs uppercase tracking-widest transition flex items-center justify-center gap-1 ${
+                cooldownTime > 0 
+                  ? 'bg-red-900/60 border border-red-500 text-red-300 cursor-not-allowed animate-pulse' 
+                  : 'bg-slate-800 hover:bg-emerald-600 disabled:bg-slate-900 disabled:border-slate-800 disabled:text-slate-600 border border-slate-700 hover:border-emerald-500 text-slate-200 hover:text-white'
+              }`}
             >
-              {loadingAction ? 'PROCESSING...' : 'EXECUTE TRANSFER'}
+              {loadingAction ? (
+                'PROCESSING...'
+              ) : cooldownTime > 0 ? (
+                <>
+                  <Timer className="w-3.5 h-3.5 animate-spin" />
+                  COOLDOWN: {cooldownTime}S
+                </>
+              ) : (
+                'EXECUTE TRANSFER'
+              )}
             </button>
           </form>
         </div>
