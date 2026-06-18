@@ -6,7 +6,6 @@ import { ShieldAlert, Timer } from 'lucide-react';
 
 export default function PlayerDashboard() {
   const [player, setPlayer] = useState<any>(null);
-  const playerRef = useRef<any>(null); // ใช้ useRef เพื่อให้ท่อ Realtime เข้าถึงสีทีมปัจจุบันได้แม่นยำ
   
   // ฟอร์มส่งข้อมูล
   const [targetId, setTargetId] = useState('');
@@ -20,11 +19,6 @@ export default function PlayerDashboard() {
   // ⏱️ ระบบ Cooldown 30 วินาที 
   const [cooldownTime, setCooldownTime] = useState(0);
 
-  // อัปเดต ref ทุกครั้งที่ข้อมูล player เปลี่ยนแปลง
-  useEffect(() => {
-    playerRef.current = player;
-  }, [player]);
-
   useEffect(() => {
     const cachedId = localStorage.getItem('player_id');
     if (!cachedId) return router.push('/');
@@ -35,7 +29,7 @@ export default function PlayerDashboard() {
     };
     initFetch();
 
-    // 🌐 ท่อ Realtime อัจฉริยะ ดักฟังทั้งแต้มตัวเอง และตรวจคูลดาวน์ข้ามทีม
+    // 🌐 ท่อ Realtime อัจฉริยะ ป้องกันบั๊กตัวพิมพ์เล็ก-ใหญ่ และตัดช่องว่างทิ้ง
     const playerChannel = supabase
       .channel(`my-private-score-${cachedId}`)
       .on(
@@ -48,12 +42,12 @@ export default function PlayerDashboard() {
           setPlayer(newData);
 
           // 🚨 เช็กกลไกคูลดาวน์สำหรับฝั่ง "คนรับโอน"
-          // ถ้าแต้มเพิ่มขึ้น และมีการแนบข้อมูลสีของคนโอนมาในช่อง last_transfer_by
           if (newData.score > (oldData?.score || 0) && newData.last_transfer_by) {
-            const myColor = playerRef.current?.team_color?.toLowerCase();
-            const senderColor = newData.last_transfer_by.toLowerCase(); // เราจะแอบส่งสีทีมคนโอนมาในนี้
+            // แปลงข้อมูลทุกอย่างให้เป็นตัวพิมพ์เล็ก + ตัดช่องว่างทิ้งก่อนเอามาเทียบกัน ป้องกันบั๊กสะกดไม่ตรงกัน
+            const myColor = newData.team_color?.trim().toLowerCase();
+            const senderColor = newData.last_transfer_by?.trim().toLowerCase();
 
-            // ถ้าคนละสีกัน (โอนข้ามทีม) สั่งให้เครื่องคนรับติดคูลดาวน์ 30 วินาทีทันที!
+            // หากเป็นคนละสีกันจริง (โอนข้ามทีมชัวร์) -> เครื่องคนรับสั่งขังตัวเองติดคูลดาวน์ทันที 30 วิ
             if (myColor && senderColor && myColor !== senderColor) {
               setCooldownTime(30);
               setActionMessage({ 
@@ -71,7 +65,7 @@ export default function PlayerDashboard() {
     };
   }, [router]);
 
-  // ⏱️ ฟังก์ชันนับถอยหลัง Cooldown 
+  // ⏱️ ฟังก์ชันนับถอยหลัง Cooldown ทุกๆ 1 วินาที
   useEffect(() => {
     if (cooldownTime <= 0) return;
     const timer = setInterval(() => {
@@ -118,22 +112,22 @@ export default function PlayerDashboard() {
         return setActionMessage({ text: `ไม่สามารถโอนได้เนื่องจากไอดี ${cleanTargetId} ยังไม่ได้เปิดใช้งาน ❌`, isError: true });
       }
 
-      const isCrossTeam = player.team_color?.toLowerCase() !== targetPlayer.team_color?.toLowerCase();
+      const isCrossTeam = player.team_color?.trim().toLowerCase() !== targetPlayer.team_color?.trim().toLowerCase();
 
       // 📤 อัปเดตข้อมูลขึ้น Supabase
       // ฝั่งคนโอน: ลดแต้มปกติ
       await db().from('players').update({ score: player.score - amount }).eq('id', player.id);
       
-      // ฝั่งคนรับ: เพิ่มแต้ม + แนบ "สีทีมของคนโอน" ไปในช่อง last_transfer_by เพื่อให้ท่อ Realtime ฝั่งนู้นใช้เช็กข้ามทีม
+      // ฝั่งคนรับ: เพิ่มแต้ม + แนบสีทีมของคนโอนไปบอก เพื่อให้ท่อ Realtime ฝั่งนู้นใช้ดักล็อกคูลดาวน์คู่
       await db().from('players').update({ 
         score: targetPlayer.score + amount,
-        last_transfer_by: player.team_color // 👈 ส่งสีทีมของตัวเองไปบอกคนรับ
+        last_transfer_by: player.team_color // บันทึกสีทีมตัวเองส่งไปให้คนรับตรวจเช็ก
       }).eq('id', targetPlayer.id);
 
-      // ✨ [Optimistic Update] ปรับแต้มบนหน้าจอมือถือตัวเองทันที
+      // ✨ [Optimistic Update] ปรับแต้มบนหน้าจอมือถือตัวเองทันทีโดยไม่ต้องรอ Fetch ใหม่
       setPlayer((prev: any) => ({ ...prev, score: prev.score - amount }));
 
-      // ถ้าเป็นการโอนข้ามทีม ฝั่งคนโอนก็ติดคูลดาวน์ทันที 30 วินาที
+      // หากเป็นการโอนข้ามทีม ฝั่งคนโอนจะเข้าสู่สถานะคูลดาวน์ทันที 30 วินาที
       if (isCrossTeam) {
         setCooldownTime(30);
         setActionMessage({ text: `โอนข้ามทีมสำเร็จ! มอบ ${amount} แต้มให้ ${targetPlayer.id} ⚠️ แพ็คคู่คูลดาวน์ทำงาน 30 วินาที!`, isError: false });
@@ -191,8 +185,7 @@ export default function PlayerDashboard() {
 
       await db().from('drop_codes').update({ is_used: true, used_by: player.id, used_at: new Date().toISOString() }).eq('code', cleanedCode);
       
-      // สังเกตตรงนี้: ตอนอัปเดตแต้มจากไอเทม เราจะไม่มีการใส่ฟิลด์ last_transfer_by เด็ดขาด 
-      // ทำให้ท่อ Realtime รู้ว่าเป็นไอเทมระบบและไม่สั่งติดคูลดาวน์ครับ ปลอดภัยหายห่วง!
+      // เมื่อใช้ไอเทม จะไม่มีการส่งฟิลด์ last_transfer_by ระบบไอเทมจึงจะไม่กวนคูลดาวน์โอนข้ามทีม
       if (cData.effect_type !== 'team_plus_5' && cData.effect_type !== 'enemy_minus_5') {
         await db().from('players').update({ score: newScore }).eq('id', player.id);
         setPlayer((prev: any) => ({ ...prev, score: newScore }));
