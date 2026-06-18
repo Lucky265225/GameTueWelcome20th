@@ -19,18 +19,22 @@ export default function PlayerDashboard() {
   // ⏱️ ระบบ Cooldown 30 วินาที 
   const [cooldownTime, setCooldownTime] = useState(0);
 
-  // 1. 🔄 ดึงค่าคูลดาวน์เก่าจาก localStorage ตอนเปิดหน้าจอครั้งแรก (ป้องกันการรีเฟรชหนี)
-  useEffect(() => {
-    const cachedCooldownUntil = localStorage.getItem('cooldown_until');
-    if (cachedCooldownUntil) {
-      const remainingTime = Math.ceil((parseInt(cachedCooldownUntil) - Date.now()) / 1000);
-      if (remainingTime > 0) {
-        setCooldownTime(remainingTime);
-      } else {
-        localStorage.removeItem('cooldown_until');
+  // 1. 🔄 ฟังก์ชันเช็กและดึงค่าคูลดาวน์ที่เหลือจากความจำเครื่อง
+  const checkStoredCooldown = () => {
+    if (typeof window !== 'undefined') {
+      const cachedCooldownUntil = localStorage.getItem('cooldown_until');
+      if (cachedCooldownUntil) {
+        const remainingTime = Math.ceil((parseInt(cachedCooldownUntil) - Date.now()) / 1000);
+        if (remainingTime > 0) {
+          setCooldownTime(remainingTime);
+          return remainingTime;
+        } else {
+          localStorage.removeItem('cooldown_until');
+        }
       }
     }
-  }, []);
+    return 0;
+  };
 
   useEffect(() => {
     const cachedId = localStorage.getItem('player_id');
@@ -38,7 +42,10 @@ export default function PlayerDashboard() {
 
     const initFetch = async () => {
       const { data: pData } = await db().from('players').select('*').eq('id', cachedId).single();
-      if (pData) setPlayer(pData);
+      if (pData) {
+        setPlayer(pData);
+        checkStoredCooldown();
+      }
     };
     initFetch();
 
@@ -57,7 +64,6 @@ export default function PlayerDashboard() {
             const senderColor = newData.last_transfer_by?.trim().toLowerCase();
 
             if (myColor && senderColor && myColor !== senderColor) {
-              // 💾 บันทึกเวลาที่หมดคูลดาวน์ลงเครื่องคนรับ (อีก 30 วินาทีข้างหน้า)
               const cooldownUntil = Date.now() + 30000;
               localStorage.setItem('cooldown_until', cooldownUntil.toString());
               
@@ -79,16 +85,16 @@ export default function PlayerDashboard() {
     };
   }, [router]);
 
-  // ⏱️ ฟังก์ชันนับถอยหลัง Cooldown ทุกๆ 1 วินาที + คอยล้าง localStorage เมื่อหมดเวลา
+  // ⏱️ ฟังก์ชันนับถอยหลัง Cooldown ทุกๆ 1 วินาที
   useEffect(() => {
     if (cooldownTime <= 0) {
-      localStorage.removeItem('cooldown_until');
+      if (typeof window !== 'undefined') localStorage.removeItem('cooldown_until');
       return;
     }
     const timer = setInterval(() => {
       setCooldownTime((prev) => {
         if (prev - 1 <= 0) {
-          localStorage.removeItem('cooldown_until');
+          if (typeof window !== 'undefined') localStorage.removeItem('cooldown_until');
           return 0;
         }
         return prev - 1;
@@ -103,12 +109,21 @@ export default function PlayerDashboard() {
     const amount = parseInt(transferAmount);
     const cleanTargetId = targetId.toUpperCase().trim();
 
-    if (cooldownTime > 0) {
-      return setActionMessage({ text: `ระบบโอนติดคูลดาวน์! กรุณารออีก ${cooldownTime} วินาที`, isError: true });
+    // เช็กสถานะคูลดาวน์จากเครื่อง
+    const currentCooldown = checkStoredCooldown();
+    if (currentCooldown > 0 || cooldownTime > 0) {
+      return setActionMessage({ text: `ระบบโอนติดคูลดาวน์! กรุณารออีก ${currentCooldown || cooldownTime} วินาที`, isError: true });
     }
+    
     if (!cleanTargetId || isNaN(amount) || amount <= 0) {
       return setActionMessage({ text: 'กรุณากรอกข้อมูลการโอนให้ถูกต้อง', isError: true });
     }
+
+    // 🚨 🔍 ใหม่: เงื่อนไขดักจับแต้มโอนต้องหารด้วย 5 ลงตัวเท่านั้น
+    if (amount % 5 !== 0) {
+      return setActionMessage({ text: '❌ จำนวนแต้มที่โอนต้องหารด้วย 5 ลงตัวเท่านั้น (เช่น 5, 10, 15, 20...)', isError: true });
+    }
+
     if (player.score < amount) {
       return setActionMessage({ text: 'แต้มของคุณมีไม่เพียงพอสำหรับการโอน', isError: true });
     }
@@ -147,7 +162,6 @@ export default function PlayerDashboard() {
       setPlayer((prev: any) => ({ ...prev, score: prev.score - amount }));
 
       if (isCrossTeam) {
-        // 💾 บันทึกเวลาที่หมดคูลดาวน์ลงเครื่องคนโอน (อีก 30 วินาทีข้างหน้า)
         const cooldownUntil = Date.now() + 30000;
         localStorage.setItem('cooldown_until', cooldownUntil.toString());
 
