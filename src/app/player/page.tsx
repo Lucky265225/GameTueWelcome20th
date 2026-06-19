@@ -2,12 +2,12 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { db, supabase } from '@/lib/supabase';
-import { ShieldAlert, Timer } from 'lucide-react';
+import { ShieldAlert, User, Eye, ArrowLeftRight, X } from 'lucide-react';
 
 export default function PlayerDashboard() {
   const [player, setPlayer] = useState<any>(null);
   
-  // ฟอร์มส่งข้อมูล
+  // ฟอร์มส่งข้อมูลปกติ
   const [targetId, setTargetId] = useState('');
   const [transferAmount, setTransferAmount] = useState('');
   const [dropCodeInput, setDropCodeInput] = useState('');
@@ -19,7 +19,11 @@ export default function PlayerDashboard() {
   // ⏱️ ระบบ Cooldown 
   const [cooldownTime, setCooldownTime] = useState(0);
 
-  // ฟังก์ชันคำนวณวินาทีที่เหลือจาก Timestamp ของเซิร์ฟเวอร์
+  // 🔮 ระบบ Popup สำหรับไอเทมลับ (See Score / Swap Score)
+  const [activePopup, setActivePopup] = useState<{ type: 'see_score' | 'swap_score'; codeData: any } | null>(null);
+  const [targetQuery, setTargetQuery] = useState(''); // เก็บค่าที่พิมพ์ค้นหา (ID หรือ ชื่อ)
+  const [popupMessage, setPopupMessage] = useState({ text: '', isError: false });
+
   const calculateRemainingCooldown = (cooldownUntilStr: string | null) => {
     if (!cooldownUntilStr) return 0;
     const remaining = Math.ceil((new Date(cooldownUntilStr).getTime() - Date.now()) / 1000);
@@ -34,14 +38,12 @@ export default function PlayerDashboard() {
       const { data: pData } = await db().from('players').select('*').eq('id', cachedId).single();
       if (pData) {
         setPlayer(pData);
-        // 🔄 ดึงเวลาคูลดาวน์จริงจากฐานข้อมูลมาตั้งค่านับถอยหลังทันทีเมื่อเปิดหน้าจอ (รีเฟรชยังไงก็ไม่หาย)
         const remaining = calculateRemainingCooldown(pData.cooldown_until);
         if (remaining > 0) setCooldownTime(remaining);
       }
     };
     initFetch();
 
-    // 🌐 ท่อ Realtime ตรวจจับความเปลี่ยนแปลงจากฐานข้อมูล
     const playerChannel = supabase
       .channel(`my-private-score-${cachedId}`)
       .on(
@@ -51,14 +53,12 @@ export default function PlayerDashboard() {
           const newData = payload.new;
           setPlayer(newData);
 
-          // 🚨 เช็กเวลาคูลดาวน์ใหม่จากฐานข้อมูลที่พึ่งอัปเดตเข้ามา
           if (newData) {
             const remaining = calculateRemainingCooldown(newData.cooldown_until);
             if (remaining > 0) {
               setCooldownTime(remaining);
             }
 
-            // ดักจับฝั่งคนรับโอนข้ามทีม
             if (newData.last_transfer_by) {
               const myColor = newData.team_color?.trim().toLowerCase();
               const senderColor = newData.last_transfer_by?.trim().toLowerCase();
@@ -69,7 +69,6 @@ export default function PlayerDashboard() {
                   isError: true 
                 });
                 
-                // ฝั่งคนรับ: คำนวณเวลาหมดคูลดาวน์ (อีก 30 วินาทีข้างหน้า) ส่งไปบันทึกบนฐานข้อมูล Supabase 
                 const futureTime = new Date(Date.now() + 30000).toISOString();
                 db().from('players').update({ 
                   cooldown_until: futureTime,
@@ -87,7 +86,6 @@ export default function PlayerDashboard() {
     };
   }, [router]);
 
-  // ⏱️ ฟังก์ชันนับถอยหลัง Cooldown ทุกๆ 1 วินาทีบนหน้าจอ
   useEffect(() => {
     if (cooldownTime <= 0) return;
     const timer = setInterval(() => {
@@ -96,13 +94,13 @@ export default function PlayerDashboard() {
     return () => clearInterval(timer);
   }, [cooldownTime]);
 
+  // ฟังก์ชันโอนเงินปกติ
   const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     setActionMessage({ text: '', isError: false });
     const amount = parseInt(transferAmount);
     const cleanTargetId = targetId.toUpperCase().trim();
 
-    // 🛑 ดักจับรอบแรกบนหน้าจอ
     if (cooldownTime > 0) {
       return setActionMessage({ text: `ระบบโอนติดคูลดาวน์! กรุณารออีก ${cooldownTime} วินาที`, isError: true });
     }
@@ -123,7 +121,6 @@ export default function PlayerDashboard() {
     try {
       setLoadingAction(true);
       
-      // ดึงข้อมูลล่าสุดจากฐานข้อมูลเพื่อเช็กเวลาคูลดาวน์จริงๆ บนเซิร์ฟเวอร์อีกรอบ (กันผู้เล่นหัวหมอแอบโมโค้ดหน้าบ้าน)
       const { data: latestMe } = await db().from('players').select('cooldown_until, score').eq('id', player.id).single();
       const dbRemaining = calculateRemainingCooldown(latestMe?.cooldown_until);
       
@@ -152,14 +149,11 @@ export default function PlayerDashboard() {
       const isCrossTeam = player.team_color?.trim().toLowerCase() !== targetPlayer.team_color?.trim().toLowerCase();
       const futureTime = new Date(Date.now() + 30000).toISOString();
 
-      // 📤 อัปเดตข้อมูลขึ้น Supabase
-      // ฝั่งคนโอน: ลดแต้มปกติ + ถ้าโอนข้ามทีมให้ยัดเวลาหมดคูลดาวน์ (futureTime) ลงฐานข้อมูลไปด้วยเลย!
       await db().from('players').update({ 
         score: latestMe.score - amount,
         cooldown_until: isCrossTeam ? futureTime : null
       }).eq('id', player.id);
       
-      // ฝั่งคนรับ: เพิ่มแต้ม + ส่งสีทีมของคนโอนไปบอก
       await db().from('players').update({ 
         score: targetPlayer.score + amount,
         last_transfer_by: player.team_color 
@@ -187,6 +181,7 @@ export default function PlayerDashboard() {
     }
   };
 
+  // ฟังก์ชันเคลมโค้ดหลัก
   const handleClaimCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setActionMessage({ text: '', isError: false });
@@ -206,6 +201,16 @@ export default function PlayerDashboard() {
         return setActionMessage({ text: 'โค้ดนี้ถูกใช้งานไปแล้ว ❌', isError: true });
       }
 
+      // ดักจับถ้าเป็นโค้ดประเภท See Score หรือ Swap Score
+      if (cData.effect_type === 'see_score' || cData.effect_type === 'swap_score') {
+        setTargetQuery('');
+        setPopupMessage({ text: '', isError: false });
+        setActivePopup({ type: cData.effect_type, codeData: cData }); // เปิด Popup
+        setLoadingAction(false);
+        return; 
+      }
+
+      // เอฟเฟกต์ปกติแบบเดิม
       let newScore = player.score;
       let alertMsg = '';
 
@@ -242,28 +247,114 @@ export default function PlayerDashboard() {
     }
   };
 
+  // ฟังก์ชันประมวลผลคำขอจากใน Popup (แก้ไขเพิ่มระบบสืบค้นแยกแบบยืดหยุ่น)
+  const handlePopupSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activePopup) return;
+    setPopupMessage({ text: '', isError: false });
+
+    const cleanQuery = targetQuery.trim();
+    if (!cleanQuery) return setPopupMessage({ text: 'กรุณากรอกรหัส ID หรือชื่อผู้เล่น', isError: true });
+
+    try {
+      setLoadingAction(true);
+
+      // 🔍 ค้นหาขั้นที่ 1: ค้นหาจาก ID ตรงๆ ดูก่อน (แปลงเป็นตัวใหญ่)
+      let { data: targetPlayer } = await db()
+        .from('players')
+        .select('*')
+        .eq('id', cleanQuery.toUpperCase())
+        .maybeSingle();
+
+      // 🔍 ค้นหาขั้นที่ 2: ถ้า ID หาไม่เจอ ให้ลองหาตามชื่อ (player_name)
+      if (!targetPlayer) {
+        const { data: nameMatch } = await db()
+          .from('players')
+          .select('*')
+          .ilike('player_name', cleanQuery)
+          .maybeSingle();
+        
+        targetPlayer = nameMatch;
+      }
+
+      // ตรวจสอบผลลัพธ์การค้นหา
+      if (!targetPlayer) {
+        setLoadingAction(false);
+        return setPopupMessage({ text: '❌ ไม่พบข้อมูลผู้เล่นหรือชื่อนี้ในระบบ', isError: true });
+      }
+
+      if (targetPlayer.id === player.id) {
+        setLoadingAction(false);
+        return setPopupMessage({ text: '❌ ไม่สามารถเลือกตัวเองเป็นเป้าหมายได้', isError: true });
+      }
+
+      const code = activePopup.codeData.code;
+
+      if (activePopup.type === 'see_score') {
+        // --- 🔍 1. เอฟเฟกต์เห็นแต้มคนอื่น ---
+        await db().from('drop_codes').update({ is_used: true, used_by: player.id, used_at: new Date().toISOString() }).eq('code', code);
+        
+        setPopupMessage({ 
+          text: `🔍 ส่องสำเร็จ! ผู้เล่น [${targetPlayer.id}] ${targetPlayer.player_name || ''} ปัจจุบันมีคะแนนเท่ากับ: ${targetPlayer.score} แต้ม!`, 
+          isError: false 
+        });
+        
+        setActionMessage({ text: `ใช้โค้ดส่องแต้ม ${code} สำเร็จแล้ว!`, isError: false });
+        setDropCodeInput('');
+        setLoadingAction(false);
+
+      } else if (activePopup.type === 'swap_score') {
+        // --- 🔄 2. เอฟเฟกต์สลับแต้ม ---
+        const myCurrentScore = player.score;
+        const targetCurrentScore = targetPlayer.score;
+
+        await db().from('players').update({ score: targetCurrentScore }).eq('id', player.id);
+        await db().from('players').update({ score: myCurrentScore }).eq('id', targetPlayer.id);
+        await db().from('drop_codes').update({ is_used: true, used_by: player.id, used_at: new Date().toISOString() }).eq('code', code);
+
+        setPlayer((prev: any) => ({ ...prev, score: targetCurrentScore }));
+
+        setActionMessage({ 
+          text: `💥 มหาเวทย์สลับร่างสำเร็จ! คุณสลับแต้มกับ [${targetPlayer.id}] แล้ว (แต้มใหม่ของคุณคือ ${targetCurrentScore})`, 
+          isError: false 
+        });
+        
+        setDropCodeInput('');
+        setLoadingAction(false);
+        setActivePopup(null); // สลับคะแนนสำเร็จให้ปิดป๊อปอัพทันที
+      }
+
+    } catch (err) {
+      setLoadingAction(false);
+      setPopupMessage({ text: 'เกิดข้อผิดพลาดในการประมวลผลคำสั่งพิเศษ', isError: true });
+    }
+  };
+
   if (!player) return <div className="min-h-screen bg-slate-950 flex justify-center items-center text-xs tracking-widest text-slate-400">CONNECTING...</div>;
 
   const isJailed = player.score <= 0;
 
   return (
-    <main className={`min-h-screen p-4 flex flex-col items-center transition-colors duration-500 ${isJailed ? 'bg-red-950/90' : 'bg-slate-950'}`}>
+    <main className={`min-h-screen p-4 flex flex-col items-center transition-colors duration-500 relative ${isJailed ? 'bg-red-950/90' : 'bg-slate-950'}`}>
       <div className="w-full max-w-sm space-y-4">
         
         {/* บัตรสเตตัสผู้เล่น */}
         {isJailed ? (
           <div className="bg-red-900/40 border-2 border-red-500 rounded-2xl p-5 text-center space-y-2 shadow-[0_0_30px_rgba(239,68,68,0.3)] animate-pulse">
             <ShieldAlert className="w-12 h-12 text-red-500 mx-auto" />
+            <div className="inline-block px-4 py-1 bg-red-500 text-white font-mono text-xl font-black rounded-lg tracking-wider mb-1">{player.id}</div>
             <h2 className="text-2xl font-black text-white">คุณติดคุก! 🚨</h2>
             <p className="text-xs text-red-300">คะแนนหมดลงแล้ว ฟังก์ชันถูกล็อก จนกว่าแอดมินจะปล่อยตัว</p>
           </div>
         ) : (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 relative overflow-hidden">
-            <div className="absolute top-0 left-0 right-0 h-[3px]" style={{ backgroundColor: player.team_color }} />
-            <div className="flex justify-between items-start">
+            <div className="absolute top-0 left-0 right-0 h-[4px]" style={{ backgroundColor: player.team_color }} />
+            <div className="flex justify-between items-center">
               <div>
-                <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 font-mono font-bold rounded">{player.id}</span>
-                <h2 className="text-xl font-black mt-1.5 text-slate-100">{player.player_name || 'No Name'}</h2>
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-950 border border-slate-800 text-cyan-400 font-mono text-lg font-black rounded-xl tracking-widest shadow-inner">
+                  {player.id}
+                </div>
+                <h2 className="text-xl font-black mt-2 text-slate-100">{player.player_name || 'No Name'}</h2>
                 <p className="text-xs text-slate-400 mt-0.5">
                   TEAM: <span className="font-bold uppercase" style={{ color: player.team_color }}>{player.team_color}</span>
                 </p>
@@ -334,21 +425,89 @@ export default function PlayerDashboard() {
                   : 'bg-slate-800 hover:bg-emerald-600 disabled:bg-slate-900 disabled:border-slate-800 disabled:text-slate-600 border border-slate-700 hover:border-emerald-500 text-slate-200 hover:text-white'
               }`}
             >
-              {loadingAction ? (
-                'PROCESSING...'
-              ) : cooldownTime > 0 ? (
-                <>
-                  <Timer className="w-3.5 h-3.5 animate-spin" />
-                  COOLDOWN: {cooldownTime}S
-                </>
-              ) : (
-                'EXECUTE TRANSFER'
-              )}
+              {loadingAction ? 'PROCESSING...' : cooldownTime > 0 ? `COOLDOWN: ${cooldownTime}S` : 'EXECUTE TRANSFER'}
             </button>
           </form>
         </div>
 
       </div>
+
+      {/* 🔮 UI โมดอล POPUP พิเศษสำหรับไอเทมส่องแต้ม / สลับแต้ม */}
+      {activePopup && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex justify-center items-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-sm rounded-2xl p-5 space-y-4 relative shadow-2xl">
+            
+            {/* ปุ่มปิด Popup */}
+            <button 
+              onClick={() => setActivePopup(null)} 
+              className="absolute top-4 right-4 text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            {/* หัวข้อตามไอเทมที่ใช้ */}
+            <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+              {activePopup.type === 'see_score' ? (
+                <>
+                  <div className="p-2 bg-cyan-500/10 text-cyan-400 rounded-xl"><Eye className="w-5 h-5" /></div>
+                  <div>
+                    <h3 className="text-sm font-black text-white uppercase">ACTIVATED: ดูคะแนนคนอื่น</h3>
+                    <p className="text-[10px] text-slate-400">ค้นหาเป้าหมายเพื่อแอบดูคะแนน</p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="p-2 bg-amber-500/10 text-amber-400 rounded-xl"><ArrowLeftRight className="w-5 h-5" /></div>
+                  <div>
+                    <h3 className="text-sm font-black text-amber-400 uppercase">ACTIVATED: มหาเวทย์สลับแต้ม</h3>
+                    <p className="text-[10px] text-slate-400">เลือกเป้าหมายที่จะสลับคะแนนด้วย</p>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* ฟอร์มกรอกเป้าหมาย */}
+            <form onSubmit={handlePopupSubmit} className="space-y-3">
+              <div>
+                <label className="text-[10px] font-bold text-slate-400 block mb-1">ระบุผู้เล่นเป้าหมาย (พิมพ์ ID หรือ ชื่อจริงก็ได้)</label>
+                <input
+                  type="text"
+                  placeholder="เช่น Y01 หรือ ชื่อผู้เล่น"
+                  value={targetQuery}
+                  onChange={(e) => setTargetQuery(e.target.value)}
+                  disabled={loadingAction}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white text-xs font-bold focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loadingAction}
+                className={`w-full py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition ${
+                  activePopup.type === 'see_score' 
+                    ? 'bg-cyan-600 hover:bg-cyan-500 text-white' 
+                    : 'bg-amber-600 hover:bg-amber-500 text-white'
+                }`}
+              >
+                {loadingAction ? 'กำลังตรวจสอบ...' : 'ยืนยันเป้าหมาย'}
+              </button>
+            </form>
+
+            {/* ส่วนแสดงผลข้อมูลการส่อง หรือ Error ใน Popup */}
+            {popupMessage.text && (
+              <div className={`text-xs p-3 rounded-xl border font-bold text-center leading-relaxed ${
+                popupMessage.isError 
+                  ? 'text-red-400 bg-red-500/10 border-red-500/20' 
+                  : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'
+              }`}>
+                {popupMessage.text}
+              </div>
+            )}
+
+          </div>
+        </div>
+      )}
+
     </main>
   );
 }
